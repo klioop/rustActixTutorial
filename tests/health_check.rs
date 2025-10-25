@@ -1,25 +1,60 @@
 use std::net::TcpListener;
 
-use sqlx::{PgConnection, Connection};
+use sqlx::{Connection, Executor, PgConnection, PgPool};
+use uuid::Uuid;
 
 use zero2prod::startup;
-use zero2prod::configuration;
+use zero2prod::configuration::{get_configuration, DataBaseSettings};
 
-fn spawn_app() -> String {
+struct TestApp {
+    address: String,
+    db_pool: PgPool,
+}
+
+async fn spawn_app() -> TestApp {
+    let mut configuration = get_configuration().expect("Failed to read configuration.");
+    configuration.database.database_name = Uuid::new_v4().to_string();
+    let connection_pool = configure_database(&configuration.database).await;
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind address");
     let port = listener.local_addr().unwrap().port();
-    let server = startup::run(listener).expect("Failed to bind address");
+    let server = startup::run(listener, connection_pool.clone()).expect("Failed to bind address");
     let _ = tokio::spawn(server);
-    format!("http://127.0.0.1:{}", port)
+    let address = format!("http://127.0.0.1:{}", port);
+    TestApp { address, db_pool: connection_pool }
+}
+
+pub async fn configure_database(config: &DataBaseSettings) -> PgPool {
+    let maintance_settings = DataBaseSettings {
+        database_name: "postgres".to_string(),
+        username: "postgres".to_string(),
+        password: "password".to_string(),
+        ..config.clone()
+    };
+    let mut connection = PgConnection::connect(&maintance_settings.connection_string())
+        .await
+        .expect("failed to connect Postgres");
+    connection.execute(
+        format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str()
+    )
+    .await
+    .expect("failed to create database");
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("failed to connect to Postgres");
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("failed to run migrations");
+    connection_pool
 }
 
 #[tokio::test]
 async fn health_check_works() {
-    let address = spawn_app();
+    let app = spawn_app().await;
     let client = reqwest::Client::new();
 
     let response = client
-        .get(&format!("{}/health_check", address))
+        .get(&format!("{}/health_check", &app.address))
         .send()
         .await
         .expect("Failed to execute request.");
@@ -30,17 +65,12 @@ async fn health_check_works() {
 
 #[tokio::test]
 async fn subscribe_returns_a_200_for_valid_form_data() {
-    let address = spawn_app();
-    let configuration = configuration::get_configuration().expect("Failed to read configuration.");
-    let connection_string = configuration.database.connection_string();
-    let _connection = PgConnection::connect(&connection_string)
-    .await
-    .expect("Failed to connect to Postgres.");
+    let app = spawn_app().await;
     let client = reqwest::Client::new();
     let body = "name=le%20guin&email=ursula_le_guin%40gmail.com";
 
     let response = client
-        .post(&format!("{}/subscriptions", address))
+        .post(&format!("{}/subscriptions", &app.address))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -48,11 +78,18 @@ async fn subscribe_returns_a_200_for_valid_form_data() {
         .expect("Failed to execute request.");
 
     assert_eq!(response.status().as_u16(), 200);
+
+    let saved = sqlx::query!("SELECT name, email FROM subscriptions")
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("Failed to fetch saved subscription.");
+    assert_eq!(saved.email, "ursula_le_guin@gmail.com");
+    assert_eq!(saved.name, "le guin");
 }
 
 #[tokio::test]
-async fn subscrbe_returns_a_400_when_data_is_missing() {
-    let address = spawn_app();
+async fn subscribe_returns_a_400_when_data_is_missing() {
+    let app = spawn_app().await;
     let client = reqwest::Client::new();
 
     let test_cases = vec![
@@ -63,7 +100,7 @@ async fn subscrbe_returns_a_400_when_data_is_missing() {
 
     for (body, error_message) in test_cases {
         let response = client
-        .post(&format!("{}/subscriptions", address))
+        .post(&format!("{}/subscriptions", &app.address))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
