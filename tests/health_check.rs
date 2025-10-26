@@ -1,10 +1,22 @@
 use std::net::TcpListener;
+use std::sync::LazyLock;
 
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use uuid::Uuid;
 
-use zero2prod::startup;
 use zero2prod::configuration::{get_configuration, DataBaseSettings};
+use zero2prod::startup;
+use zero2prod::telemetry::{get_subscriber, init_subscriber};
+
+static TRACING: LazyLock<()> = LazyLock::new(|| {
+    if std::env::var("TEST_LOG").is_ok() {
+        let subscriber = get_subscriber("test".to_string(), "debug".into(), std::io::stdout);
+        init_subscriber(subscriber);
+    } else {
+        let subscriber = get_subscriber("test".to_string(), "debug".into(), std::io::sink);
+        init_subscriber(subscriber);
+    }
+});
 
 struct TestApp {
     address: String,
@@ -12,6 +24,8 @@ struct TestApp {
 }
 
 async fn spawn_app() -> TestApp {
+    LazyLock::force(&TRACING);
+
     let mut configuration = get_configuration().expect("Failed to read configuration.");
     configuration.database.database_name = Uuid::new_v4().to_string();
     let connection_pool = configure_database(&configuration.database).await;
