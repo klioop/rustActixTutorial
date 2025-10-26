@@ -10,10 +10,18 @@ use zero2prod::telemetry::{get_subscriber, init_subscriber};
 
 static TRACING: LazyLock<()> = LazyLock::new(|| {
     if std::env::var("TEST_LOG").is_ok() {
-        let subscriber = get_subscriber("test".to_string(), "debug".into(), std::io::stdout);
+        let subscriber = get_subscriber(
+            "test".to_string(), 
+            "debug".into(), 
+            std::io::stdout
+        );
         init_subscriber(subscriber);
     } else {
-        let subscriber = get_subscriber("test".to_string(), "debug".into(), std::io::sink);
+        let subscriber = get_subscriber(
+            "test".to_string(), 
+            "debug".into(), 
+            std::io::sink
+        );
         init_subscriber(subscriber);
     }
 });
@@ -34,7 +42,10 @@ async fn spawn_app() -> TestApp {
     let server = startup::run(listener, connection_pool.clone()).expect("Failed to bind address");
     let _ = tokio::spawn(server);
     let address = format!("http://127.0.0.1:{}", port);
-    TestApp { address, db_pool: connection_pool }
+    TestApp { 
+        address, 
+        db_pool: connection_pool 
+    }
 }
 
 pub async fn configure_database(config: &DataBaseSettings) -> PgPool {
